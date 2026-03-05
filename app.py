@@ -4,6 +4,8 @@ Tout est contenu dans ce fichier unique (pas de dépendances locales)
 """
 import streamlit as st
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
