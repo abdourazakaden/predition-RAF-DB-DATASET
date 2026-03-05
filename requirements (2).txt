@@ -8,3 +8,9 @@ seaborn
 scikit-learn
 tqdm
 streamlit
+torch
+torchvision
+matplotlib
+numpy
+Pillow
+scikit-learn
