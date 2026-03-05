@@ -1,34 +1,53 @@
 """
-app.py — Application Streamlit autonome pour RAF-DB
-Tout est contenu dans ce fichier unique (pas de dépendances locales)
+app.py — RAF-DB Emotion Detection (Streamlit Cloud)
 """
-import streamlit as st
-import numpy as np
+import sys
+import subprocess
+
+# Installation forcée des packages si absents
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package, "-q"])
+
+try:
+    import matplotlib
+except ImportError:
+    install("matplotlib")
+    import matplotlib
+
+try:
+    import torch
+except ImportError:
+    install("torch")
+    install("torchvision")
+    import torch
+
+try:
+    import numpy as np
+except ImportError:
+    install("numpy")
+    import numpy as np
+
+try:
+    from PIL import Image
+except ImportError:
+    install("Pillow")
+    from PIL import Image
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from PIL import Image
+import streamlit as st
 
 # ─────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────
 CLASS_NAMES = {
-    0: "Surprise",
-    1: "Fear",
-    2: "Disgust",
-    3: "Happiness",
-    4: "Sadness",
-    5: "Anger",
-    6: "Neutral"
+    0: "Surprise", 1: "Fear",    2: "Disgust",
+    3: "Happiness", 4: "Sadness", 5: "Anger", 6: "Neutral"
 }
 CLASS_EMOJIS = {
-    "Surprise":  "😮",
-    "Fear":      "😨",
-    "Disgust":   "🤢",
-    "Happiness": "😊",
-    "Sadness":   "😢",
-    "Anger":     "😠",
-    "Neutral":   "😐",
+    "Surprise": "😮", "Fear": "😨", "Disgust": "🤢",
+    "Happiness": "😊", "Sadness": "😢", "Anger": "😠", "Neutral": "😐",
 }
 IMG_SIZE    = 224
 NUM_CLASSES = 7
@@ -40,7 +59,6 @@ st.set_page_config(
     page_title="RAF-DB — Détection d'émotions",
     page_icon="🎭",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
@@ -57,49 +75,28 @@ st.markdown("""
     }
     .top3-item {
         background: rgba(255,255,255,0.08);
-        border-radius: 8px; padding: 0.6rem 1rem;
-        margin: 0.3rem 0;
+        border-radius: 8px; padding: 0.6rem 1rem; margin: 0.3rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────
-# CHARGEMENT TORCH (avec message d'erreur clair)
-# ─────────────────────────────────────────────────────
-@st.cache_resource
-def load_torch():
-    try:
-        import torch
-        import torch.nn as nn
-        from torchvision import transforms
-        return torch, nn, transforms, None
-    except ImportError as e:
-        return None, None, None, str(e)
-
-torch, nn, transforms, torch_error = load_torch()
-
-# ─────────────────────────────────────────────────────
-# MODÈLE CNN FROM SCRATCH (défini ici directement)
+# MODÈLE CNN FROM SCRATCH
 # ─────────────────────────────────────────────────────
 @st.cache_resource
 def build_and_load_model(ckpt_path):
-    if torch is None:
-        return None, None, "PyTorch non disponible"
     try:
         import torch
         import torch.nn as nn
         import torch.nn.functional as F
+        from torchvision import transforms
 
         class ConvBlock(nn.Module):
             def __init__(self, in_ch, out_ch, pool=False):
                 super().__init__()
-                layers = [
-                    nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=False),
-                    nn.BatchNorm2d(out_ch),
-                    nn.ReLU(inplace=True),
-                ]
-                if pool:
-                    layers.append(nn.MaxPool2d(2, 2))
+                layers = [nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=False),
+                          nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True)]
+                if pool: layers.append(nn.MaxPool2d(2, 2))
                 self.block = nn.Sequential(*layers)
             def forward(self, x): return self.block(x)
 
@@ -108,9 +105,8 @@ def build_and_load_model(ckpt_path):
                 super().__init__()
                 self.se = nn.Sequential(
                     nn.AdaptiveAvgPool2d(1), nn.Flatten(),
-                    nn.Linear(ch, ch // r, bias=False), nn.ReLU(inplace=True),
-                    nn.Linear(ch // r, ch, bias=False), nn.Sigmoid(),
-                )
+                    nn.Linear(ch, ch//r, bias=False), nn.ReLU(inplace=True),
+                    nn.Linear(ch//r, ch, bias=False), nn.Sigmoid())
             def forward(self, x):
                 return x * self.se(x).view(x.size(0), x.size(1), 1, 1)
 
@@ -130,23 +126,23 @@ def build_and_load_model(ckpt_path):
             def __init__(self, num_classes=7):
                 super().__init__()
                 self.stem   = nn.Sequential(
-                    ConvBlock(3, 32), ConvBlock(32, 64, pool=True),
-                    ConvBlock(64, 64, pool=True))
+                    ConvBlock(3,32), ConvBlock(32,64,pool=True),
+                    ConvBlock(64,64,pool=True))
                 self.stage1 = nn.Sequential(
-                    ConvBlock(64, 128), SEBlock(128), ResBlock(128),
-                    nn.MaxPool2d(2, 2), nn.Dropout2d(0.1))
+                    ConvBlock(64,128), SEBlock(128), ResBlock(128),
+                    nn.MaxPool2d(2,2), nn.Dropout2d(0.1))
                 self.stage2 = nn.Sequential(
-                    ConvBlock(128, 256), SEBlock(256), ResBlock(256),
-                    ResBlock(256), nn.MaxPool2d(2, 2), nn.Dropout2d(0.15))
+                    ConvBlock(128,256), SEBlock(256), ResBlock(256),
+                    ResBlock(256), nn.MaxPool2d(2,2), nn.Dropout2d(0.15))
                 self.stage3 = nn.Sequential(
-                    ConvBlock(256, 512), SEBlock(512), ResBlock(512),
-                    ResBlock(512), nn.MaxPool2d(2, 2), nn.Dropout2d(0.2))
+                    ConvBlock(256,512), SEBlock(512), ResBlock(512),
+                    ResBlock(512), nn.MaxPool2d(2,2), nn.Dropout2d(0.2))
                 self.stage4 = nn.Sequential(
-                    ConvBlock(512, 512), SEBlock(512), ResBlock(512))
+                    ConvBlock(512,512), SEBlock(512), ResBlock(512))
                 self.gap    = nn.AdaptiveAvgPool2d(1)
                 self.head   = nn.Sequential(
                     nn.Flatten(), nn.Dropout(0.4),
-                    nn.Linear(512, 256), nn.BatchNorm1d(256),
+                    nn.Linear(512,256), nn.BatchNorm1d(256),
                     nn.ReLU(inplace=True), nn.Dropout(0.3),
                     nn.Linear(256, num_classes))
             def forward(self, x):
@@ -159,29 +155,24 @@ def build_and_load_model(ckpt_path):
         ckpt   = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(ckpt["model_state"])
         model.eval()
-        return model, device, None
+
+        tf = transforms.Compose([
+            transforms.Resize((IMG_SIZE, IMG_SIZE)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
+        ])
+        return model, device, tf, None
 
     except Exception as e:
-        return None, None, str(e)
+        return None, None, None, str(e)
 
 
-def get_transform():
-    return transforms.Compose([
-        transforms.Resize((IMG_SIZE, IMG_SIZE)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225]),
-    ])
-
-
-def predict(image, model, device):
+def predict(image, model, device, tf):
     import torch
-    tf     = get_transform()
     tensor = tf(image).unsqueeze(0).to(device)
     with torch.no_grad():
-        out   = model(tensor)
-        probs = torch.softmax(out, dim=1).squeeze().cpu().numpy()
-    idx = probs.argmax()
+        probs = torch.softmax(model(tensor), dim=1).squeeze().cpu().numpy()
+    idx   = probs.argmax()
     names = list(CLASS_NAMES.values())
     return {
         "class":      names[idx],
@@ -197,24 +188,11 @@ def predict(image, model, device):
 # ─────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
-    ckpt_path = st.text_input(
-        "Chemin du checkpoint .pth",
-        value="checkpoints/best_model.pth",
-    )
+    ckpt_path = st.text_input("Checkpoint .pth", value="checkpoints/best_model.pth")
     st.markdown("---")
-    st.markdown("### 🎭 Classes supportées")
+    st.markdown("### 🎭 Classes")
     for name, emoji in CLASS_EMOJIS.items():
         st.write(f"{emoji} {name}")
-    st.markdown("---")
-    st.markdown("### 📐 Architecture")
-    st.code("""FaceEmotionCNN
-STEM    : Conv 3→64
-Stage1  : 64→128 + SE
-Stage2  : 128→256 + SE
-Stage3  : 256→512 + SE
-Stage4  : 512→512 + SE
-GAP → FC(512→7)
-~4.5M paramètres""", language="text")
 
 # ─────────────────────────────────────────────────────
 # UI — TITRE
@@ -231,55 +209,42 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────
-# VÉRIFICATION PYTORCH
-# ─────────────────────────────────────────────────────
-if torch_error:
-    st.error(f"❌ PyTorch non installé : {torch_error}")
-    st.stop()
-
-# ─────────────────────────────────────────────────────
 # CHARGEMENT MODÈLE
 # ─────────────────────────────────────────────────────
-model, device, model_error = build_and_load_model(ckpt_path)
+model, device, tf, model_error = build_and_load_model(ckpt_path)
 
 if model_error:
     st.warning(f"⚠️ Modèle non chargé : {model_error}")
-    st.info("📌 Entraînez d'abord le modèle avec `python train.py` "
-            "puis déposez `best_model.pth` dans le dossier `checkpoints/`.")
+    st.info("Entraînez le modèle avec `python train.py` puis déposez "
+            "`best_model.pth` dans `checkpoints/`.")
     model = None
 else:
-    st.success("✅ Modèle chargé avec succès !")
+    st.success("✅ Modèle chargé !")
 
 # ─────────────────────────────────────────────────────
-# UPLOAD IMAGE
+# UPLOAD & PRÉDICTION
 # ─────────────────────────────────────────────────────
 st.markdown("## 📤 Chargez une image")
-tab1, tab2 = st.tabs(["📁 Upload fichier", "📷 Caméra"])
+tab1, tab2 = st.tabs(["📁 Upload", "📷 Caméra"])
 uploaded = None
 with tab1:
-    uploaded = st.file_uploader(
-        "Image JPG / PNG / WEBP",
-        type=["jpg", "jpeg", "png", "bmp", "webp"])
+    uploaded = st.file_uploader("Image JPG / PNG",
+                                type=["jpg","jpeg","png","bmp","webp"])
 with tab2:
-    cam = st.camera_input("Prendre une photo")
-    if cam:
-        uploaded = cam
+    cam = st.camera_input("Photo")
+    if cam: uploaded = cam
 
-# ─────────────────────────────────────────────────────
-# PRÉDICTION & RÉSULTATS
-# ─────────────────────────────────────────────────────
 if uploaded and model:
     image = Image.open(uploaded).convert("RGB")
     col1, col2 = st.columns([1, 1.4], gap="large")
 
     with col1:
         st.markdown("### 🖼️ Image")
-        st.image(image, use_column_width=True,
-                 caption=f"{image.size[0]}×{image.size[1]} px")
+        st.image(image, use_column_width=True)
 
     with col2:
         with st.spinner("🔍 Analyse..."):
-            result = predict(image, model, device)
+            result = predict(image, model, device, tf)
 
         emoji = CLASS_EMOJIS.get(result["class"], "")
         conf  = result["confidence"] * 100
@@ -294,12 +259,10 @@ if uploaded and model:
             </p>
         </div>
         """, unsafe_allow_html=True)
-
         st.progress(int(conf))
 
         st.markdown("### 🏆 Top 3")
-        medals = ["🥇", "🥈", "🥉"]
-        for medal, (name, prob) in zip(medals, result["top3"]):
+        for medal, (name, prob) in zip(["🥇","🥈","🥉"], result["top3"]):
             em = CLASS_EMOJIS.get(name, "")
             p  = prob * 100
             st.markdown(f"""
@@ -310,7 +273,6 @@ if uploaded and model:
             """, unsafe_allow_html=True)
             st.progress(int(p))
 
-    # Distribution complète
     st.markdown("---")
     st.markdown("### 📊 Distribution complète")
     fig, ax = plt.subplots(figsize=(10, 3))
@@ -327,23 +289,19 @@ if uploaded and model:
     for spine in ax.spines.values():
         spine.set_edgecolor("#3d5af1")
     for bar, p in zip(bars, probs):
-        ax.text(p + 0.5, bar.get_y() + bar.get_height() / 2,
+        ax.text(p + 0.5, bar.get_y() + bar.get_height()/2,
                 f"{p:.1f}%", va="center", color="white", fontsize=9)
     plt.tight_layout()
     st.pyplot(fig)
     plt.close()
 
-elif uploaded and not model:
-    st.warning("⚠️ Chargez un checkpoint valide dans la sidebar.")
-
-else:
-    # Page d'accueil
+elif not model:
     st.markdown("---")
     cols = st.columns(3)
     for col, (icon, title, desc) in zip(cols, [
-        ("🧠", "CNN from Scratch", "Architecture custom 4 stages + SE Blocks"),
-        ("📸", "RAF-DB Dataset",   "15 000+ images, 7 expressions réelles"),
-        ("⚡", "Temps réel",       "Inférence rapide sur CPU"),
+        ("🧠", "CNN from Scratch", "4 stages + SE Blocks + ResBlocks"),
+        ("📸", "RAF-DB",           "15 000+ images, 7 expressions"),
+        ("⚡", "Temps réel",       "Inférence CPU rapide"),
     ]):
         with col:
             st.markdown(f"""
@@ -353,8 +311,3 @@ else:
                 <p style="font-size:0.85rem;color:rgba(255,255,255,0.6);margin:0.3rem 0 0">{desc}</p>
             </div>
             """, unsafe_allow_html=True)
-    st.markdown("""
-    <p style="text-align:center;color:rgba(255,255,255,0.4);margin-top:2rem">
-        👆 Uploadez une image de visage pour détecter l'émotion
-    </p>
-    """, unsafe_allow_html=True)
