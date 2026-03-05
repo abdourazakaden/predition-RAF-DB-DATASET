@@ -7,7 +7,7 @@ Usage :
 """
 import os
 import io
-import numpy as np
+import numpy as np 
 import torch
 import streamlit as st
 from PIL import Image
