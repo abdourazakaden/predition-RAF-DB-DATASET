@@ -1,23 +1,38 @@
 """
-app.py
-ÉTAPE 9 — Application Web avec Streamlit
-
-Usage :
-    streamlit run app.py
+app.py — Application Streamlit autonome pour RAF-DB
+Tout est contenu dans ce fichier unique (pas de dépendances locales)
 """
-import os
-import io
-import numpy as np 
-import torch
 import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
-from torchvision import transforms
-
-import config
-from model import load_model
 
 # ─────────────────────────────────────────────────────
-# CONFIGURATION STREAMLIT
+# CONFIGURATION
+# ─────────────────────────────────────────────────────
+CLASS_NAMES = {
+    0: "Surprise",
+    1: "Fear",
+    2: "Disgust",
+    3: "Happiness",
+    4: "Sadness",
+    5: "Anger",
+    6: "Neutral"
+}
+CLASS_EMOJIS = {
+    "Surprise":  "😮",
+    "Fear":      "😨",
+    "Disgust":   "🤢",
+    "Happiness": "😊",
+    "Sadness":   "😢",
+    "Anger":     "😠",
+    "Neutral":   "😐",
+}
+IMG_SIZE    = 224
+NUM_CLASSES = 7
+
+# ─────────────────────────────────────────────────────
+# PAGE CONFIG
 # ─────────────────────────────────────────────────────
 st.set_page_config(
     page_title="RAF-DB — Détection d'émotions",
@@ -26,78 +41,152 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# CSS personnalisé
 st.markdown("""
 <style>
-    .main { background-color: #0f0f23; }
-    .stApp { background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%); }
     .title-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 2rem; border-radius: 15px; text-align: center;
-        margin-bottom: 2rem; box-shadow: 0 8px 32px rgba(102,126,234,0.3);
+        margin-bottom: 2rem;
     }
     .emotion-card {
         background: rgba(255,255,255,0.05);
-        border: 1px solid rgba(255,255,255,0.1);
+        border: 1px solid rgba(255,255,255,0.15);
         border-radius: 12px; padding: 1.5rem;
-        backdrop-filter: blur(10px);
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #11998e, #38ef7d);
-        border-radius: 10px; padding: 1rem;
-        text-align: center; color: white;
     }
     .top3-item {
         background: rgba(255,255,255,0.08);
         border-radius: 8px; padding: 0.6rem 1rem;
-        margin: 0.3rem 0; display: flex;
-        justify-content: space-between; align-items: center;
+        margin: 0.3rem 0;
     }
-    .stProgress > div > div { background: linear-gradient(90deg,#667eea,#764ba2); }
 </style>
 """, unsafe_allow_html=True)
 
-
 # ─────────────────────────────────────────────────────
-# CHARGEMENT DU MODÈLE (mis en cache)
+# CHARGEMENT TORCH (avec message d'erreur clair)
 # ─────────────────────────────────────────────────────
 @st.cache_resource
-def load_emotion_model(ckpt_path: str):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def load_torch():
     try:
-        model = load_model(ckpt_path, device)
+        import torch
+        import torch.nn as nn
+        from torchvision import transforms
+        return torch, nn, transforms, None
+    except ImportError as e:
+        return None, None, None, str(e)
+
+torch, nn, transforms, torch_error = load_torch()
+
+# ─────────────────────────────────────────────────────
+# MODÈLE CNN FROM SCRATCH (défini ici directement)
+# ─────────────────────────────────────────────────────
+@st.cache_resource
+def build_and_load_model(ckpt_path):
+    if torch is None:
+        return None, None, "PyTorch non disponible"
+    try:
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+
+        class ConvBlock(nn.Module):
+            def __init__(self, in_ch, out_ch, pool=False):
+                super().__init__()
+                layers = [
+                    nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=False),
+                    nn.BatchNorm2d(out_ch),
+                    nn.ReLU(inplace=True),
+                ]
+                if pool:
+                    layers.append(nn.MaxPool2d(2, 2))
+                self.block = nn.Sequential(*layers)
+            def forward(self, x): return self.block(x)
+
+        class SEBlock(nn.Module):
+            def __init__(self, ch, r=16):
+                super().__init__()
+                self.se = nn.Sequential(
+                    nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+                    nn.Linear(ch, ch // r, bias=False), nn.ReLU(inplace=True),
+                    nn.Linear(ch // r, ch, bias=False), nn.Sigmoid(),
+                )
+            def forward(self, x):
+                return x * self.se(x).view(x.size(0), x.size(1), 1, 1)
+
+        class ResBlock(nn.Module):
+            def __init__(self, ch):
+                super().__init__()
+                self.c1 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
+                self.b1 = nn.BatchNorm2d(ch)
+                self.c2 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
+                self.b2 = nn.BatchNorm2d(ch)
+            def forward(self, x):
+                r = x
+                x = F.relu(self.b1(self.c1(x)), inplace=True)
+                return F.relu(self.b2(self.c2(x)) + r, inplace=True)
+
+        class FaceEmotionCNN(nn.Module):
+            def __init__(self, num_classes=7):
+                super().__init__()
+                self.stem   = nn.Sequential(
+                    ConvBlock(3, 32), ConvBlock(32, 64, pool=True),
+                    ConvBlock(64, 64, pool=True))
+                self.stage1 = nn.Sequential(
+                    ConvBlock(64, 128), SEBlock(128), ResBlock(128),
+                    nn.MaxPool2d(2, 2), nn.Dropout2d(0.1))
+                self.stage2 = nn.Sequential(
+                    ConvBlock(128, 256), SEBlock(256), ResBlock(256),
+                    ResBlock(256), nn.MaxPool2d(2, 2), nn.Dropout2d(0.15))
+                self.stage3 = nn.Sequential(
+                    ConvBlock(256, 512), SEBlock(512), ResBlock(512),
+                    ResBlock(512), nn.MaxPool2d(2, 2), nn.Dropout2d(0.2))
+                self.stage4 = nn.Sequential(
+                    ConvBlock(512, 512), SEBlock(512), ResBlock(512))
+                self.gap    = nn.AdaptiveAvgPool2d(1)
+                self.head   = nn.Sequential(
+                    nn.Flatten(), nn.Dropout(0.4),
+                    nn.Linear(512, 256), nn.BatchNorm1d(256),
+                    nn.ReLU(inplace=True), nn.Dropout(0.3),
+                    nn.Linear(256, num_classes))
+            def forward(self, x):
+                x = self.stem(x); x = self.stage1(x); x = self.stage2(x)
+                x = self.stage3(x); x = self.stage4(x)
+                return self.head(self.gap(x))
+
+        device = torch.device("cpu")
+        model  = FaceEmotionCNN(NUM_CLASSES).to(device)
+        ckpt   = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state"])
+        model.eval()
         return model, device, None
+
     except Exception as e:
-        return None, device, str(e)
+        return None, None, str(e)
 
 
 def get_transform():
     return transforms.Compose([
-        transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)),
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406],
                              [0.229, 0.224, 0.225]),
     ])
 
 
-# ─────────────────────────────────────────────────────
-# PRÉDICTION
-# ─────────────────────────────────────────────────────
-def predict(image: Image.Image, model, device) -> dict:
-    transform = get_transform()
-    tensor    = transform(image).unsqueeze(0).to(device)
-    model.eval()
+def predict(image, model, device):
+    import torch
+    tf     = get_transform()
+    tensor = tf(image).unsqueeze(0).to(device)
     with torch.no_grad():
-        outputs = model(tensor)
-        probs   = torch.softmax(outputs, dim=1).squeeze().cpu().numpy()
-    pred_idx = probs.argmax()
-    class_names = list(config.CLASS_NAMES.values())
+        out   = model(tensor)
+        probs = torch.softmax(out, dim=1).squeeze().cpu().numpy()
+    idx = probs.argmax()
+    names = list(CLASS_NAMES.values())
     return {
-        "class":         class_names[pred_idx],
-        "confidence":    float(probs[pred_idx]),
-        "probabilities": probs,
-        "class_names":   class_names,
-        "top3": sorted(zip(class_names, probs), key=lambda x: -x[1])[:3],
+        "class":      names[idx],
+        "confidence": float(probs[idx]),
+        "probs":      probs,
+        "names":      names,
+        "top3": sorted(zip(names, probs), key=lambda x: -x[1])[:3],
     }
 
 
@@ -107,145 +196,129 @@ def predict(image: Image.Image, model, device) -> dict:
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
     ckpt_path = st.text_input(
-        "Chemin du checkpoint",
-        value=config.BEST_CKPT,
-        help="Chemin vers votre fichier .pth",
+        "Chemin du checkpoint .pth",
+        value="checkpoints/best_model.pth",
     )
     st.markdown("---")
-    st.markdown("### 📊 Informations modèle")
-    st.info(f"""
-    **Architecture** : ResNet-18  
-    **Classes** : {config.NUM_CLASSES} expressions  
-    **Input** : {config.IMG_SIZE}×{config.IMG_SIZE} px  
-    **Dataset** : RAF-DB
-    """)
-    st.markdown("---")
-    st.markdown("### 🎭 Émotions supportées")
-    for label, name in config.CLASS_NAMES.items():
-        emoji = config.CLASS_EMOJIS.get(name, "•")
+    st.markdown("### 🎭 Classes supportées")
+    for name, emoji in CLASS_EMOJIS.items():
         st.write(f"{emoji} {name}")
-
     st.markdown("---")
-    st.markdown("### ℹ️ À propos")
-    st.caption(
-        "Application de reconnaissance d'expressions faciales "
-        "basée sur RAF-DB et ResNet-18."
-    )
-
+    st.markdown("### 📐 Architecture")
+    st.code("""FaceEmotionCNN
+STEM    : Conv 3→64
+Stage1  : 64→128 + SE
+Stage2  : 128→256 + SE
+Stage3  : 256→512 + SE
+Stage4  : 512→512 + SE
+GAP → FC(512→7)
+~4.5M paramètres""", language="text")
 
 # ─────────────────────────────────────────────────────
 # UI — TITRE
 # ─────────────────────────────────────────────────────
 st.markdown("""
 <div class="title-card">
-    <h1 style="color:white;margin:0;font-size:2.5rem">
+    <h1 style="color:white;margin:0;font-size:2.2rem">
         🎭 Détection d'Émotions Faciales
     </h1>
-    <p style="color:rgba(255,255,255,0.8);margin:0.5rem 0 0 0;font-size:1.1rem">
-        RAF-DB · ResNet-18 · PyTorch
+    <p style="color:rgba(255,255,255,0.8);margin:0.5rem 0 0 0">
+        RAF-DB · CNN from scratch · PyTorch
     </p>
 </div>
 """, unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────────────
+# VÉRIFICATION PYTORCH
+# ─────────────────────────────────────────────────────
+if torch_error:
+    st.error(f"❌ PyTorch non installé : {torch_error}")
+    st.stop()
 
 # ─────────────────────────────────────────────────────
-# UI — CHARGEMENT MODÈLE
+# CHARGEMENT MODÈLE
 # ─────────────────────────────────────────────────────
-model, device, error = load_emotion_model(ckpt_path)
-if error:
-    st.error(f"❌ Impossible de charger le modèle : {error}")
-    st.info("Entraînez d'abord le modèle avec `python train.py` "
-            "puis vérifiez le chemin du checkpoint.")
+model, device, model_error = build_and_load_model(ckpt_path)
+
+if model_error:
+    st.warning(f"⚠️ Modèle non chargé : {model_error}")
+    st.info("📌 Entraînez d'abord le modèle avec `python train.py` "
+            "puis déposez `best_model.pth` dans le dossier `checkpoints/`.")
     model = None
 else:
-    st.success(f"✅ Modèle chargé — Device : **{device}**")
-
+    st.success("✅ Modèle chargé avec succès !")
 
 # ─────────────────────────────────────────────────────
-# UI — UPLOAD & PRÉDICTION
+# UPLOAD IMAGE
 # ─────────────────────────────────────────────────────
 st.markdown("## 📤 Chargez une image")
-
 tab1, tab2 = st.tabs(["📁 Upload fichier", "📷 Caméra"])
-
 uploaded = None
 with tab1:
     uploaded = st.file_uploader(
-        "Choisissez une image (JPG, PNG, WEBP)",
-        type=["jpg", "jpeg", "png", "bmp", "webp"],
-    )
+        "Image JPG / PNG / WEBP",
+        type=["jpg", "jpeg", "png", "bmp", "webp"])
 with tab2:
-    camera_img = st.camera_input("Prendre une photo")
-    if camera_img is not None:
-        uploaded = camera_img
+    cam = st.camera_input("Prendre une photo")
+    if cam:
+        uploaded = cam
 
-if uploaded is not None and model is not None:
+# ─────────────────────────────────────────────────────
+# PRÉDICTION & RÉSULTATS
+# ─────────────────────────────────────────────────────
+if uploaded and model:
     image = Image.open(uploaded).convert("RGB")
-
     col1, col2 = st.columns([1, 1.4], gap="large")
 
-    # ── Colonne gauche : image ──────────────────────
     with col1:
-        st.markdown("### 🖼️ Image analysée")
+        st.markdown("### 🖼️ Image")
         st.image(image, use_column_width=True,
-                 caption=f"Taille originale : {image.size[0]}×{image.size[1]} px")
+                 caption=f"{image.size[0]}×{image.size[1]} px")
 
-    # ── Colonne droite : résultats ──────────────────
     with col2:
-        with st.spinner("🔍 Analyse en cours..."):
+        with st.spinner("🔍 Analyse..."):
             result = predict(image, model, device)
 
-        emoji = config.CLASS_EMOJIS.get(result["class"], "")
+        emoji = CLASS_EMOJIS.get(result["class"], "")
         conf  = result["confidence"] * 100
 
-        # Résultat principal
-        st.markdown("### 🎯 Résultat principal")
+        st.markdown("### 🎯 Résultat")
         st.markdown(f"""
-        <div class="emotion-card">
-            <h2 style="text-align:center;color:#00d4aa;margin:0">
-                {emoji} {result['class']}
-            </h2>
-            <p style="text-align:center;color:rgba(255,255,255,0.7);margin:0.3rem 0">
+        <div class="emotion-card" style="text-align:center">
+            <div style="font-size:3rem">{emoji}</div>
+            <h2 style="color:#00d4aa;margin:0">{result['class']}</h2>
+            <p style="color:rgba(255,255,255,0.7)">
                 Confiance : <strong style="color:#38ef7d">{conf:.1f}%</strong>
             </p>
         </div>
         """, unsafe_allow_html=True)
 
-        # Jauge de confiance
-        st.markdown("**Niveau de confiance**")
-        color = "normal" if conf >= 70 else "off"
-        st.progress(int(conf), text=f"{conf:.1f}%")
+        st.progress(int(conf))
 
-        # Top 3
-        st.markdown("### 🏆 Top 3 prédictions")
+        st.markdown("### 🏆 Top 3")
         medals = ["🥇", "🥈", "🥉"]
         for medal, (name, prob) in zip(medals, result["top3"]):
-            em = config.CLASS_EMOJIS.get(name, "")
+            em = CLASS_EMOJIS.get(name, "")
             p  = prob * 100
             st.markdown(f"""
             <div class="top3-item">
-                <span>{medal} {em} <strong style="color:white">{name}</strong></span>
-                <span style="color:#38ef7d;font-weight:bold">{p:.1f}%</span>
+                <b>{medal} {em} {name}</b>
+                <span style="float:right;color:#38ef7d"><b>{p:.1f}%</b></span>
             </div>
             """, unsafe_allow_html=True)
             st.progress(int(p))
 
-    # ── Distribution complète ──────────────────────
+    # Distribution complète
     st.markdown("---")
-    st.markdown("### 📊 Distribution complète des probabilités")
-
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(10, 3.5))
+    st.markdown("### 📊 Distribution complète")
+    fig, ax = plt.subplots(figsize=(10, 3))
     fig.patch.set_facecolor("#16213e")
     ax.set_facecolor("#16213e")
-
-    names  = result["class_names"]
-    probs  = result["probabilities"] * 100
+    names  = result["names"]
+    probs  = result["probs"] * 100
     colors = ["#00d4aa" if n == result["class"] else "#3d5af1" for n in names]
-    emojis = [config.CLASS_EMOJIS.get(n, "") for n in names]
-    labels = [f"{e} {n}" for e, n in zip(emojis, names)]
-
-    bars = ax.barh(labels, probs, color=colors, edgecolor="none", height=0.6)
+    labels = [f"{CLASS_EMOJIS.get(n,'')} {n}" for n in names]
+    bars   = ax.barh(labels, probs, color=colors, edgecolor="none", height=0.6)
     ax.set_xlim(0, 105)
     ax.set_xlabel("Probabilité (%)", color="white")
     ax.tick_params(colors="white")
@@ -254,56 +327,32 @@ if uploaded is not None and model is not None:
     for bar, p in zip(bars, probs):
         ax.text(p + 0.5, bar.get_y() + bar.get_height() / 2,
                 f"{p:.1f}%", va="center", color="white", fontsize=9)
-
     plt.tight_layout()
     st.pyplot(fig)
     plt.close()
 
-    # ── Téléchargement du résultat ──────────────────
-    st.markdown("---")
-    result_text = (
-        f"Expression détectée : {result['class']}\n"
-        f"Confiance : {conf:.2f}%\n\n"
-        f"Toutes les probabilités :\n"
-    )
-    for name, prob in zip(names, probs):
-        result_text += f"  {name}: {prob:.2f}%\n"
-
-    st.download_button(
-        "⬇️ Télécharger les résultats (.txt)",
-        data=result_text,
-        file_name="emotion_result.txt",
-        mime="text/plain",
-    )
-
-elif uploaded is not None and model is None:
-    st.warning("⚠️ Veuillez d'abord charger un modèle valide.")
+elif uploaded and not model:
+    st.warning("⚠️ Chargez un checkpoint valide dans la sidebar.")
 
 else:
-    # Page d'accueil sans image
+    # Page d'accueil
     st.markdown("---")
-    cols = st.columns(4)
-    infos = [
-        ("🎭", "7 émotions", "Surprise, Peur, Dégoût, Bonheur, Tristesse, Colère, Neutre"),
-        ("🧠", "ResNet-18", "Fine-tuning sur ImageNet + RAF-DB"),
-        ("📸", "Images réelles", "Dataset RAF-DB — 15 000+ images"),
-        ("⚡", "Temps réel", "Inférence rapide sur CPU/GPU"),
-    ]
-    for col, (icon, title, desc) in zip(cols, infos):
+    cols = st.columns(3)
+    for col, (icon, title, desc) in zip(cols, [
+        ("🧠", "CNN from Scratch", "Architecture custom 4 stages + SE Blocks"),
+        ("📸", "RAF-DB Dataset",   "15 000+ images, 7 expressions réelles"),
+        ("⚡", "Temps réel",       "Inférence rapide sur CPU"),
+    ]):
         with col:
             st.markdown(f"""
-            <div class="emotion-card" style="text-align:center;height:140px">
+            <div class="emotion-card" style="text-align:center;padding:1.5rem">
                 <div style="font-size:2rem">{icon}</div>
-                <strong style="color:#00d4aa">{title}</strong>
-                <p style="font-size:0.8rem;color:rgba(255,255,255,0.6);margin:0.3rem 0 0 0">
-                    {desc}
-                </p>
+                <b style="color:#00d4aa">{title}</b>
+                <p style="font-size:0.85rem;color:rgba(255,255,255,0.6);margin:0.3rem 0 0">{desc}</p>
             </div>
             """, unsafe_allow_html=True)
-
     st.markdown("""
-    <br>
-    <div style="text-align:center;color:rgba(255,255,255,0.5);font-size:0.9rem">
+    <p style="text-align:center;color:rgba(255,255,255,0.4);margin-top:2rem">
         👆 Uploadez une image de visage pour détecter l'émotion
-    </div>
+    </p>
     """, unsafe_allow_html=True)
