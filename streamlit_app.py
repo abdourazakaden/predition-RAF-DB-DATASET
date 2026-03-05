@@ -1,210 +1,233 @@
 import streamlit as st
 import pickle
 import numpy as np
-import pandas as pd 
+from PIL import Image
+import io
 
 # ============================================================
 # CONFIG PAGE
 # ============================================================
 st.set_page_config(
-    page_title="🩺 Prédiction Diabète", 
-    page_icon="🩺",
+    page_title="🎭 Prédiction Émotion RAF-DB",
+    page_icon="🎭",
     layout="centered"
 )
 
 # ============================================================
-# CHARGEMENT DU MODÈLE
+# CLASSES & EMOJIS
+# ============================================================
+CLASS_NAMES = ["Surprise", "Fear", "Disgust", "Happiness", "Sadness", "Anger", "Neutral"]
+CLASS_EMOJIS = {
+    "Surprise":  "😮",
+    "Fear":      "😨",
+    "Disgust":   "🤢",
+    "Happiness": "😊",
+    "Sadness":   "😢",
+    "Anger":     "😠",
+    "Neutral":   "😐",
+}
+CLASS_DESC = {
+    "Surprise":  "Événement inattendu, étonnement",
+    "Fear":      "Peur, menace perçue",
+    "Disgust":   "Répulsion, dégoût",
+    "Happiness": "Joie, bonheur, sourire",
+    "Sadness":   "Tristesse, douleur émotionnelle",
+    "Anger":     "Colère, frustration",
+    "Neutral":   "Expression neutre, calme",
+}
+
+# ============================================================
+# CHARGEMENT DU MODÈLE (.pkl)
 # ============================================================
 @st.cache_resource
-def load_model(fichier_pkl): 
+def load_model(fichier_pkl):
     data = pickle.load(fichier_pkl)
-    return (
-        data['models'],
-        data['imputer'],
-        data['scaler'],
-        data['features'],
-        data['best']
-    )
+    return data['model'], data['transform'], data.get('accuracy', None)
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 with st.sidebar:
-    st.header("📁 Modèle ML")
-    pkl_file = st.file_uploader("Charger modele_diabete.pkl", type="pkl")
+    st.header("📁 Modèle CNN")
+    pkl_file = st.file_uploader("Charger modele_rafdb.pkl", type="pkl")
     st.markdown("---")
     st.header("ℹ️ À propos")
-    st.write("Cette application prédit si une personne est **diabétique ou non** à partir de ses données médicales.")
+    st.write("Cette application prédit l'**émotion faciale** d'une personne à partir d'une photo.")
     st.markdown("---")
-    st.write("**Dataset :** Pima Indians Diabetes")
-    st.write("**Source :** Kaggle")
-    st.write("**Patients :** 768")
-    st.write("**Variables :** 8")
+    st.write("**Dataset :** RAF-DB")
+    st.write("**Modèle :** CNN from scratch")
+    st.write("**Images :** 15 339")
+    st.write("**Classes :** 7 émotions")
+    st.markdown("---")
+    st.header("🎭 Émotions supportées")
+    for name in CLASS_NAMES:
+        emoji = CLASS_EMOJIS[name]
+        st.write(f"{emoji} **{name}** — {CLASS_DESC[name]}")
 
 # ============================================================
 # TITRE
 # ============================================================
-st.title("🩺 Prédiction du Diabète")
-st.write("Remplissez les critères médicaux ci-dessous pour savoir si vous êtes à risque de diabète.")
+st.title("🎭 Prédiction d'Émotion Faciale")
+st.write("Chargez une **photo de visage** pour détecter automatiquement l'émotion exprimée.")
 st.markdown("---")
 
 # Vérification modèle
 if pkl_file is None:
-    st.info("👈 Chargez d'abord **modele_diabete.pkl** dans la barre latérale.")
+    st.info("👈 Chargez d'abord **modele_rafdb.pkl** dans la barre latérale.")
     st.stop()
 
 try:
-    models, imputer, scaler, features, best_name = load_model(pkl_file)
-    st.sidebar.success(f"✅ Modèle chargé !\n🥇 **{best_name}**")
+    model, transform, accuracy = load_model(pkl_file)
+    acc_text = f" — Accuracy : **{accuracy:.2f}%**" if accuracy else ""
+    st.sidebar.success(f"✅ Modèle chargé !{acc_text}")
 except Exception as e:
-    st.error(f"❌ Erreur : {e}")
+    st.error(f"❌ Erreur lors du chargement : {e}")
     st.stop()
 
 # ============================================================
-# ÉTAPE 1 — CRITÈRES MÉDICAUX
+# ÉTAPE 1 — CHARGER UNE IMAGE
 # ============================================================
-st.subheader("📋 Étape 1 — Renseignez vos critères médicaux")
-st.write("Répondez à chaque question en déplaçant le curseur :")
+st.subheader("📋 Étape 1 — Chargez une image de visage")
+st.write("Sélectionnez une photo contenant un visage humain :")
 st.markdown("---")
 
-# Question 1
-st.write("**1. Quel est votre âge ?**")
-age = st.slider("Âge (ans)", 18, 90, 30, label_visibility="collapsed")
-st.caption(f"➜ Âge sélectionné : **{age} ans**")
-st.markdown(" ")
+tab1, tab2 = st.tabs(["📁 Upload fichier", "📷 Caméra"])
+uploaded = None
 
-# Question 2
-st.write("**2. Combien de grossesses avez-vous eu ?** *(0 si aucune ou homme)*")
-pregnancies = st.slider("Grossesses", 0, 20, 0, label_visibility="collapsed")
-st.caption(f"➜ Nombre de grossesses : **{pregnancies}**")
-st.markdown(" ")
+with tab1:
+    uploaded = st.file_uploader(
+        "Image JPG / PNG / WEBP",
+        type=["jpg", "jpeg", "png", "bmp", "webp"],
+        label_visibility="collapsed"
+    )
 
-# Question 3
-st.write("**3. Quel est votre taux de glucose dans le sang ? (mg/dL)**")
-st.caption("💡 Valeur normale à jeun : entre 70 et 100 mg/dL")
-glucose = st.slider("Glucose (mg/dL)", 50, 250, 100, label_visibility="collapsed")
-st.caption(f"➜ Glucose : **{glucose} mg/dL**")
-st.markdown(" ")
+with tab2:
+    cam = st.camera_input("Prendre une photo avec la caméra")
+    if cam:
+        uploaded = cam
 
-# Question 4
-st.write("**4. Quelle est votre tension artérielle diastolique ? (mmHg)**")
-st.caption("💡 Valeur normale : entre 60 et 80 mmHg")
-bp = st.slider("Tension (mmHg)", 30, 130, 70, label_visibility="collapsed")
-st.caption(f"➜ Tension : **{bp} mmHg**")
-st.markdown(" ")
+if uploaded is None:
+    st.warning("⚠️ Aucune image chargée. Uploadez une photo pour continuer.")
+    st.stop()
 
-# Question 5 
-st.write("**5. Quelle est l'épaisseur de votre pli cutané ? (mm)**")
-st.caption("💡 Mesure au niveau du triceps — valeur normale : 10 à 30 mm")
-skin = st.slider("Épaisseur peau (mm)", 0, 100, 20, label_visibility="collapsed")
-st.caption(f"➜ Épaisseur peau : **{skin} mm**")
-st.markdown(" ")
+# Afficher l'image
+image = Image.open(uploaded).convert("RGB")
+st.markdown("---")
 
-# Question 6
-st.write("**6. Quel est votre taux d'insuline sérique ? (µU/ml)**")
-st.caption("💡 Valeur normale : entre 16 et 166 µU/ml — mettez 0 si inconnu")
-insulin = st.slider("Insuline (µU/ml)", 0, 900, 80, label_visibility="collapsed")
-st.caption(f"➜ Insuline : **{insulin} µU/ml**")
-st.markdown(" ")
+# ============================================================
+# ÉTAPE 2 — PRÉVISUALISATION
+# ============================================================
+st.subheader("📋 Étape 2 — Prévisualisation de l'image")
 
-# Question 7
-st.write("**7. Quel est votre IMC (Indice de Masse Corporelle) ?**")
-st.caption("💡 IMC = Poids(kg) / Taille²(m) — Normal : 18.5 à 24.9 — Obèse : > 30")
-bmi = st.slider("IMC (kg/m²)", 10.0, 70.0, 25.0, 0.1, label_visibility="collapsed")
-st.caption(f"➜ IMC : **{bmi} kg/m²**")
-st.markdown(" ")
-
-# Question 8
-st.write("**8. Quel est votre score de pedigree diabétique ?**")
-st.caption("💡 Ce score mesure le risque génétique selon les antécédents familiaux (0.05 = faible, 2.5 = élevé)")
-dpf = st.slider("Score Pedigree", 0.05, 2.50, 0.50, 0.01, label_visibility="collapsed")
-st.caption(f"➜ Score pedigree : **{dpf}**")
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    st.image(image, caption=f"Image chargée — {image.size[0]}×{image.size[1]} px",
+             use_column_width=True)
 
 st.markdown("---")
 
 # ============================================================
-# ÉTAPE 2 — CHOIX DU MODÈLE
+# ÉTAPE 3 — RÉCAPITULATIF IMAGE
 # ============================================================
-st.subheader("📋 Étape 2 — Choisissez le modèle de prédiction")
-model_choice = st.selectbox(
-    "Modèle ML :",
-    list(models.keys()),
-    index=list(models.keys()).index(best_name),
-    help=f"Modèle recommandé : {best_name}"
-)
-st.caption(f"🥇 Modèle recommandé : **{best_name}** (meilleur AUC)")
+st.subheader("📋 Étape 3 — Informations sur l'image")
 
-st.markdown("---")
-
-# ============================================================
-# ÉTAPE 3 — RÉCAPITULATIF
-# ============================================================
-st.subheader("📋 Étape 3 — Récapitulatif de vos critères")
-
+import pandas as pd
 recap = pd.DataFrame({
-    "Critère"  : ["Âge", "Grossesses", "Glucose", "Tension", "Épaisseur peau", "Insuline", "IMC", "Pedigree"],
-    "Valeur"   : [age, pregnancies, glucose, bp, skin, insulin, bmi, dpf],
-    "Unité"    : ["ans", "nb", "mg/dL", "mmHg", "mm", "µU/ml", "kg/m²", "score"],
-    "Référence": ["18–80", "0–17", "70–100 (normal)", "60–80 (normal)", "10–30 (normal)", "16–166 (normal)", "18.5–24.9 (normal)", "0.05–0.5 (faible)"]
+    "Paramètre": ["Format",      "Taille originale",              "Mode couleur", "Taille après resize"],
+    "Valeur":    [uploaded.name if hasattr(uploaded, 'name') else "caméra",
+                  f"{image.size[0]} × {image.size[1]} px",
+                  image.mode,
+                  "224 × 224 px"],
 })
 st.dataframe(recap, use_container_width=True, hide_index=True)
-
 st.markdown("---")
 
 # ============================================================
 # BOUTON PRÉDICTION
 # ============================================================
-if st.button("🔍 Prédire — Suis-je diabétique ?", use_container_width=True):
+if st.button("🔍 Prédire — Quelle est l'émotion ?", use_container_width=True):
 
-    # Construction du vecteur
-    patient     = pd.DataFrame(
-        [[pregnancies, glucose, bp, skin, insulin, bmi, dpf, age]],
-        columns=features
-    )
-    patient_imp = imputer.transform(patient)
-    patient_sc  = scaler.transform(patient_imp)
+    import torch
+
+    # Prétraitement
+    tensor = transform(image).unsqueeze(0)
 
     # Prédiction
-    model      = models[model_choice]
-    prediction = model.predict(patient_sc)[0]
-    probas     = model.predict_proba(patient_sc)[0]
+    model.eval()
+    with torch.no_grad():
+        outputs = model(tensor)
+        probs   = torch.softmax(outputs, dim=1).squeeze().numpy()
+
+    pred_idx   = int(probs.argmax())
+    pred_class = CLASS_NAMES[pred_idx]
+    pred_emoji = CLASS_EMOJIS[pred_class]
+    pred_conf  = float(probs[pred_idx]) * 100
 
     st.markdown("---")
     st.subheader("🎯 Résultat de la Prédiction")
 
     # Résultat principal
-    if prediction == 1:
-        st.error("## ⚠️ Résultat : DIABÉTIQUE")
-        st.write("Ce patient présente un **risque élevé** de diabète selon le modèle.")
-    else:
-        st.success("## ✅ Résultat : NON DIABÉTIQUE")
-        st.write("Ce patient **ne présente pas** de signe de diabète selon le modèle.")
+    color_map = {
+        "Happiness": "success",
+        "Neutral":   "success",
+        "Surprise":  "info",
+        "Sadness":   "warning",
+        "Fear":      "warning",
+        "Disgust":   "error",
+        "Anger":     "error",
+    }
+    level = color_map.get(pred_class, "info")
 
+    if level == "success":
+        st.success(f"## {pred_emoji} Émotion détectée : {pred_class.upper()}")
+    elif level == "info":
+        st.info(f"## {pred_emoji} Émotion détectée : {pred_class.upper()}")
+    elif level == "warning":
+        st.warning(f"## {pred_emoji} Émotion détectée : {pred_class.upper()}")
+    else:
+        st.error(f"## {pred_emoji} Émotion détectée : {pred_class.upper()}")
+
+    st.write(f"💬 *{CLASS_DESC[pred_class]}*")
     st.markdown("---")
 
-    # Probabilités
+    # Probabilités — Top 3
     st.subheader("📊 Probabilités :")
 
-    labels = ["✅ Non Diabétique", "⚠️ Diabétique"]
-    top2   = np.argsort(probas)[::-1][:2]
+    top3_idx = np.argsort(probs)[::-1][:3]
+    medals   = ["🥇", "🥈", "🥉"]
 
-    for i, idx in enumerate(top2):
-        emoji = "🥇" if i == 0 else "🥈"
-        st.write(f"{emoji} **{labels[idx]}** — {probas[idx]*100:.1f}%")
-        st.progress(float(probas[idx]))
+    for i, idx in enumerate(top3_idx):
+        name  = CLASS_NAMES[idx]
+        emoji = CLASS_EMOJIS[name]
+        prob  = float(probs[idx]) * 100
+        st.write(f"{medals[i]} **{emoji} {name}** — {prob:.1f}%")
+        st.progress(float(probs[idx]))
+
+    st.markdown("---")
+
+    # Toutes les émotions
+    st.subheader("📊 Toutes les émotions :")
+
+    sorted_idx = np.argsort(probs)[::-1]
+    for idx in sorted_idx:
+        name  = CLASS_NAMES[idx]
+        emoji = CLASS_EMOJIS[name]
+        prob  = float(probs[idx]) * 100
+        badge = " 🏆" if idx == pred_idx else ""
+        st.write(f"**{emoji} {name}**{badge} — {prob:.1f}%")
+        st.progress(float(probs[idx]))
 
     st.markdown("---")
 
-    # Avis des 3 modèles
-    st.subheader("🤖 Avis des 3 modèles :")
-
-    for nom, mod in models.items():
-        p  = mod.predict(patient_sc)[0]
-        pr = mod.predict_proba(patient_sc)[0]
-        badge  = "🥇 " if nom == best_name else ""
-        result = "⚠️ Diabétique" if p == 1 else "✅ Non Diabétique"
-        st.write(f"{badge}**{nom}** → {result} ({pr[1]*100:.1f}% diabète)")
-        st.progress(float(pr[1]))
+    # Récapitulatif final
+    st.subheader("📋 Récapitulatif :")
+    result_df = pd.DataFrame({
+        "Émotion":     [CLASS_NAMES[i] for i in sorted_idx],
+        "Emoji":       [CLASS_EMOJIS[CLASS_NAMES[i]] for i in sorted_idx],
+        "Probabilité": [f"{float(probs[i])*100:.2f}%" for i in sorted_idx],
+        "Détectée":    ["✅ OUI" if i == pred_idx else "" for i in sorted_idx],
+    })
+    st.dataframe(result_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.info("⚠️ Ce résultat est **indicatif uniquement**. Consultez toujours un médecin pour un diagnostic officiel.")
+    st.info("⚠️ Ce résultat est **indicatif uniquement**. La détection automatique d'émotions peut être imprécise selon la qualité de la photo.")
