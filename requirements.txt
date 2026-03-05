@@ -1,0 +1,5 @@
+streamlit
+onnxruntime
+numpy
+pandas
+Pillow
