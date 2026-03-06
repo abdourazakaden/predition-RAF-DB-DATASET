@@ -1,6 +1,5 @@
-torch
-torchvision
+streamlit
+onnxruntime
 numpy
 pandas
 Pillow
-streamlit
